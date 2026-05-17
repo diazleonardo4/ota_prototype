@@ -95,18 +95,15 @@ const LLM_TRAVELER_DATA = {
   recent_trip_cities: TRAVELER.recent_trips.map(t => t.city),
 };
 
-// Build a slightly inaccurate version of hotel data for the LLM prompt
-// This simulates a real-world bug: the LLM's data is stale/out-of-sync with the UI
-const LLM_HOTEL_DATA = HOTELS.map(h => {
-  const tweaked = { id: h.id, name: h.name, city: h.city, star: h.star, deal_rate: h.deal, regular_rate: h.rate, rating: h.rating, dist_to_center_mi: h.dist, amenities: [...h.amenities], sustainability: h.sustainability, cancellation: h.cancel, description: h.desc, resort_fee: h.resortFee || 0 };
-  // Introduce subtle data drift on some hotels
-  if (h.id === "HTL-001") { tweaked.deal_rate = 219; tweaked.rating = 4.8; }
-  if (h.id === "HTL-002") { tweaked.amenities.push("tennis court"); tweaked.resort_fee = 0; }
-  if (h.id === "HTL-009") { tweaked.deal_rate = 425; tweaked.rating = 4.9; }
-  if (h.id === "HTL-006") { tweaked.amenities.push("spa"); }
-  if (h.id === "HTL-015") { tweaked.resort_fee = 0; tweaked.deal_rate = 395; }
-  return tweaked;
-});
+// Curated projection of HOTELS for the LLM prompt. Mirrors the same pattern
+// as LLM_TRAVELER_DATA — the projection IS the data boundary.
+const LLM_HOTEL_DATA = HOTELS.map(h => ({
+  id: h.id, name: h.name, city: h.city, star: h.star,
+  deal_rate: h.deal, regular_rate: h.rate, rating: h.rating,
+  dist_to_center_mi: h.dist, amenities: [...h.amenities],
+  sustainability: h.sustainability, cancellation: h.cancel,
+  description: h.desc, resort_fee: h.resortFee || 0,
+}));
 
 const SYSTEM_PROMPT = `You are HTS's hotel booking assistant. You help travelers find and book hotels.
 
@@ -139,6 +136,7 @@ IMPORTANT RULES:
 - TRIP STATE TAG: whenever the user provides OR changes any trip detail (city, dates, nights, guests), include a <trip>{...}</trip> JSON tag with the CURRENT trip state. Fields (all optional, only include what's known): city, check_in (ISO date YYYY-MM-DD), check_out (ISO date YYYY-MM-DD), nights (integer), guests (integer). Example: <trip>{"city":"Chicago","check_in":"2026-05-22","check_out":"2026-05-25","nights":3,"guests":2}</trip>. If the user says "May 22 to May 25" you MUST emit check_in and check_out. If the user just says "3 nights" without specific dates, emit nights only. Always emit the tag when trip state changes, even if recommending hotels in the same turn.
 - For a city search, include ALL relevant hotels in that city in <hotels> (typically 4-12 IDs depending on city). The system re-ranks the cards client-side based on the traveler profile (budget proximity primary, room_type / floor / quiet preferences secondary), so the order you emit them in does not matter.
 - Greet the user by their first_name and acknowledge loyalty status when relevant. Use the profile fields judiciously: lean on them heavily for surprise picks, lightly for general recommendations (e.g., quietly prefer hotels near her budget when she gives you free choice), and do NOT robotically recite her preferences in every reply.
+- QUICK REPLY CHIPS: when your reply asks the user a question or offers a choice, include a <chips>["option 1","option 2","option 3"]</chips> tag with 2-4 short contextual suggestions (under 40 chars each). Examples: after asking for check-in date → <chips>["Next weekend","First week of June","Pick exact dates"]</chips>; after asking for guests → <chips>["Just me","2 guests","Family of 4"]</chips>; after showing hotels → <chips>["Show under $200","Different city","Tell me more about #1"]</chips>. Skip chips when the user's next action is obvious (e.g., clicking a hotel card) or when you're just confirming/acknowledging. Never repeat chips Sarah just rejected.
 - Never use markdown formatting like **bold** or bullet points. Write in plain conversational text.`;
 
 // ============ LLM ============
@@ -150,11 +148,20 @@ async function callLLM(messages, retries = 1) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ system: SYSTEM_PROMPT, messages }),
       });
-      if (!res.ok && i < retries) continue;
-      const data = await res.json();
-      if (data.content?.[0]?.text) return data.content[0].text;
+      if (res.ok) {
+        const data = await res.json();
+        if (data.content?.[0]?.text) return data.content[0].text;
+        // 200 OK but no text content — treat as malformed, retry once
+      } else if (res.status >= 400 && res.status < 500) {
+        // 4xx won't fix itself (auth, bad request, payload too large) — fail fast
+        console.error(`/api/chat returned ${res.status}`, await res.text().catch(() => ""));
+        break;
+      }
+      // 5xx or empty content: retry if we have budget left
       if (i < retries) continue;
     } catch (e) {
+      // Network errors: retry
+      console.error("network error calling /api/chat", e);
       if (i < retries) continue;
     }
   }
@@ -162,7 +169,13 @@ async function callLLM(messages, retries = 1) {
 }
 
 function parseResponse(text) {
-  const result = { text: text, hotelIds: null, detailId: null, booking: null, confirmed: false, trip: null };
+  const result = { text: text, hotelIds: null, detailId: null, booking: null, confirmed: false, trip: null, chips: null };
+
+  const chipsMatch = text.match(/<chips>(.*?)<\/chips>/s);
+  if (chipsMatch) {
+    try { result.chips = JSON.parse(chipsMatch[1]); } catch {}
+    result.text = result.text.replace(/<chips>.*?<\/chips>/s, "").trim();
+  }
 
   const tripMatch = text.match(/<trip>(.*?)<\/trip>/s);
   if (tripMatch) {
@@ -1283,6 +1296,8 @@ export default function HTSBookingAssistant() {
     }
 
     const botMsg = { from: "bot", text: parsed.text };
+
+    if (parsed.chips?.length) botMsg.quick = parsed.chips;
 
     if (parsed.hotelIds) {
       botMsg.hotels = parsed.hotelIds.map(id => HOTELS.find(h => h.id === id)).filter(Boolean);

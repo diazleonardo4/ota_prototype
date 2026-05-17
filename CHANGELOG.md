@@ -75,9 +75,20 @@ npm run dev:backup   # → http://localhost:5174
 
 ---
 
+## Final cleanup pass
+
+A few items from the outstanding list got finished:
+
+- **Past-message lock + header nav.** Re-clicking old buttons no longer mutates state. `pointer-events: none` + 0.75 opacity on past messages. Header has persistent `← Back to hotels` (when there are results) and `↻ Start over`.
+- **Generalized chip system.** Added a `<chips>["...","..."]</chips>` tag rule. Claude now emits 2-4 contextual quick replies after any question or open choice — covers the full flow, not just the welcome message. Parser strips the tag and feeds it onto `botMsg.quick`, which the existing `QuickReplies` component already renders.
+- **Welcome chips from past trips.** No longer hardcoded — generated from `TRAVELER.recent_trips`, one chip per unique city, with the hotel name appended when she has a 5★ stay there ("Back to Chicago — Lakefront Suites again?"). `Surprise me` preserved at the end.
+- **Stripped the intentional `LLM_HOTEL_DATA` drift.** The 5-hotel rate/amenity/fee tweaks were useful when demoing "the LLM has stale data" — but for this returning-user demo they just create noise. `LLM_HOTEL_DATA` is now a clean projection of `HOTELS`.
+- **Retry logic in `callLLM`.** No longer retries on 4xx (auth, bad request — won't fix itself). Now: 4xx → fail fast + log status; 5xx and network errors → one retry; malformed 200 → one retry. Same user-facing fallback string when out of budget.
+
+---
+
 ## Stuff I noticed but haven't done
 
-- Past bot messages have live interactive controls (chips, hotel cards, "continue" buttons) — clicking them creates new messages and confuses the state. Should lock down interactivity to the most recent message, with a per-message "go back / start over" button.
-- The chip system never got generalized — only the welcome message has quick replies. Every bot message after that is plain text. Could add a `<chips>` tag rule so Claude emits contextual chips throughout the flow.
-- `LLM_HOTEL_DATA` is intentionally drifted from `HOTELS` for 5 hotels to simulate stale data. Leave it if I'm demoing prompt engineering, strip it if I'm demoing the booking flow.
-- Sloppy retry logic in `callLLM` still retries on 4xx (won't fix itself). Should only retry on 5xx + network errors.
+- The personalization model could become genuinely smart if it learned weights per user instead of using fixed 1/3 / 1/3 / 1/3. If Sarah accepts king-room recommendations 100% of the time but ignores "quiet" hotels, room_type should weight higher.
+- "Welcome back" only fires for 5★ past stays. A graduated version (4★ = "you've been here", 5★ = "you loved it") could surface more loyalty signals.
+- Tool-use for live availability / multi-city / flight booking — explicitly out of scope, but the natural next architectural step once the prototype validates.
